@@ -7,6 +7,7 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <shlobj.h>
 #endif
 
 namespace sunshine {
@@ -29,6 +30,16 @@ std::string get_registry_value(HKEY hKey, const std::string& subKey, const std::
 
     RegCloseKey(hSubKey);
     return std::string(buffer);
+}
+
+std::string get_programdata_path() {
+    PWSTR pszPath;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_ProgramData, 0, NULL, &pszPath))) {
+        std::wstring ws(pszPath);
+        CoTaskMemFree(pszPath);
+        return std::string(ws.begin(), ws.end());
+    }
+    return "";
 }
 #endif
 
@@ -110,7 +121,7 @@ bool SteamDetector::is_installed() const {
 #ifdef _WIN32
     return !get_registry_value(HKEY_CURRENT_USER, "Software\\Valve\\Steam", "SteamPath").empty();
 #else
-    return true; // Asumir que está instalado para pruebas en Linux
+    return true;
 #endif
 }
 
@@ -139,55 +150,101 @@ std::vector<DetectedGame> SteamDetector::detect() {
     }
 
     for (const auto& library_path : library_paths) {
-        std::string steamapps_path = library_path + "/steamapps";
-        for (const auto& entry : std::filesystem::directory_iterator(steamapps_path)) {
-            if (entry.path().filename().string().rfind("appmanifest_", 0) == 0) {
-                std::ifstream acf_file(entry.path());
-                if (acf_file.is_open()) {
-                    DetectedGame game;
-                    game.platform = "Steam";
+        try {
+            std::string steamapps_path = library_path + "/steamapps";
+            if (!std::filesystem::exists(steamapps_path)) continue;
 
-                    std::string line;
-                    std::regex appid_regex("\"appid\"\\s+\"(\\d+)\"");
-                    std::regex name_regex("\"name\"\\s+\"(.+)\"");
-                    std::regex installdir_regex("\"installdir\"\\s+\"(.+)\"");
+            for (const auto& entry : std::filesystem::directory_iterator(steamapps_path)) {
+                if (entry.path().filename().string().rfind("appmanifest_", 0) == 0) {
+                    std::ifstream acf_file(entry.path());
+                    if (acf_file.is_open()) {
+                        DetectedGame game;
+                        game.platform = "Steam";
 
-                    while (std::getline(acf_file, line)) {
-                        std::smatch match;
-                        if (std::regex_search(line, match, appid_regex)) game.app_id = match[1];
-                        if (std::regex_search(line, match, name_regex)) game.name = match[1];
-                        if (std::regex_search(line, match, installdir_regex)) game.install_dir = match[1];
-                    }
+                        std::string line;
+                        std::regex appid_regex("\"appid\"\\s+\"(\\d+)\"");
+                        std::regex name_regex("\"name\"\\s+\"(.+)\"");
+                        std::regex installdir_regex("\"installdir\"\\s+\"(.+)\"");
 
-                    if (!game.app_id.empty()) {
-                        game.id = "steam:" + game.app_id;
-                        game.launch_cmd = "steam://rungameid/" + game.app_id;
-                        game.icon_path = steam_path + "/steam/games/" + game.app_id + ".ico";
-                        games.push_back(game);
+                        while (std::getline(acf_file, line)) {
+                            std::smatch match;
+                            if (std::regex_search(line, match, appid_regex)) game.app_id = match[1];
+                            if (std::regex_search(line, match, name_regex)) game.name = match[1];
+                            if (std::regex_search(line, match, installdir_regex)) game.install_dir = match[1];
+                        }
+
+                        if (!game.app_id.empty()) {
+                            game.id = "steam:" + game.app_id;
+                            game.launch_cmd = "steam://rungameid/" + game.app_id;
+                            games.push_back(game);
+                        }
                     }
                 }
             }
+        } catch (const std::filesystem::filesystem_error& e) {
+            BOOST_LOG(error) << "Error al acceder a la biblioteca de Steam: " << e.what();
         }
     }
 #else
-    // Devolver datos de ejemplo para entornos no-Windows (como este)
     games.push_back({"steam:101", "Juego de Ejemplo 1", "Steam", "", "steam://rungameid/101", "", "/ruta/ejemplo1", "101", true});
     games.push_back({"steam:102", "Otro Juego de Prueba", "Steam", "", "steam://rungameid/102", "", "/ruta/ejemplo2", "102", true});
 #endif
     return games;
 }
 
-// --- Implementaciones de Otros Detectores (Stubs) ---
+// --- Implementación de EpicDetector ---
 
 bool EpicDetector::is_installed() const {
-    BOOST_LOG(info) << "Epic detector stub: is_installed() llamado.";
-    return false; // Deshabilitar para la prueba
+#ifdef _WIN32
+    std::string program_data = get_programdata_path();
+    if (program_data.empty()) return false;
+    return std::filesystem::exists(program_data + "\\Epic\\EpicGamesLauncher\\Data\\Manifests");
+#else
+    return true; // Para pruebas en Linux
+#endif
 }
 
 std::vector<DetectedGame> EpicDetector::detect() {
-    BOOST_LOG(info) << "Epic detector stub: detect() llamado.";
-    return {};
+    std::vector<DetectedGame> games;
+#ifdef _WIN32
+    std::string program_data = get_programdata_path();
+    if (program_data.empty()) return games;
+
+    std::string manifests_path = program_data + "\\Epic\\EpicGamesLauncher\\Data\\Manifests";
+    if (!std::filesystem::exists(manifests_path)) return games;
+
+    for (const auto& entry : std::filesystem::directory_iterator(manifests_path)) {
+        if (entry.path().extension() == ".item") {
+            try {
+                std::ifstream manifest_file(entry.path());
+                nlohmann::json manifest = nlohmann::json::parse(manifest_file);
+
+                DetectedGame game;
+                game.platform = "Epic";
+                game.name = manifest.value("DisplayName", "");
+                game.install_dir = manifest.value("InstallLocation", "");
+                game.executable = manifest.value("LaunchExecutable", "");
+                game.app_id = manifest.value("AppName", "");
+
+                if (!game.app_id.empty() && !game.name.empty()) {
+                    game.id = "epic:" + game.app_id;
+                    game.launch_cmd = "com.epicgames.launcher://apps/" + game.app_id + "?action=launch&silent=true";
+                    games.push_back(game);
+                }
+            } catch (const std::exception& e) {
+                BOOST_LOG(error) << "Error al parsear el manifiesto de Epic: " << entry.path().string() << " - " << e.what();
+            }
+        }
+    }
+#else
+    // Devolver datos de ejemplo para entornos no-Windows
+    games.push_back({"epic:201", "Epic Game Example", "Epic", "EGS.exe", "com.epicgames.launcher://apps/ExampleApp?action=launch&silent=true", "", "/path/to/epic/game", "ExampleApp", true});
+#endif
+    return games;
 }
+
+
+// --- Implementaciones de GOGDetector (Stub) ---
 
 bool GOGDetector::is_installed() const {
     BOOST_LOG(info) << "GOG detector stub: is_installed() llamado.";

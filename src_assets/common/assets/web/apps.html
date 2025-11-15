@@ -453,12 +453,10 @@
     methods: {
       launchGame(game) {
         if (game.launch_cmd) {
-            // Para comandos como steam://, simplemente los abrimos
-            if (game.launch_cmd.startsWith('steam://')) {
+            if (game.launch_cmd.startsWith('steam://') || game.launch_cmd.startsWith('com.epicgames.launcher://')) {
                 window.location.href = game.launch_cmd;
             } else {
-                // Para otros, podríamos necesitar una API de lanzamiento más genérica
-                alert(`Lanzando: ${game.name}\nComando: ${game.launch_cmd}`);
+                alert(`Lanzamiento no soportado para: ${game.launch_cmd}`);
             }
         } else {
             alert('No hay un comando de lanzamiento definido para este juego.');
